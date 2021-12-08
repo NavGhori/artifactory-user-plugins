@@ -17,6 +17,8 @@
 import org.apache.commons.lang3.StringUtils
 import org.artifactory.api.repo.exception.ItemNotFoundRuntimeException
 import org.artifactory.exception.CancelException
+import org.artifactory.repo.RepoPath
+import org.artifactory.repo.RepoPathFactory
 
 import groovy.json.JsonSlurper
 import groovy.time.TimeCategory
@@ -52,6 +54,7 @@ executions {
     cleanup(groups: [pluginGroup]) { params ->
         def timeUnit = params['timeUnit'] ? params['timeUnit'][0] as String : DEFAULT_TIME_UNIT
         def timeInterval = params['timeInterval'] ? params['timeInterval'][0] as int : DEFAULT_TIME_INTERVAL
+        def timeFromLastModified = params['timeFromLastModified'] ? new Boolean(params['timeFromLastModified'][0]) : false
         def repos = params['repos'] as String[]
         def dryRun = params['dryRun'] ? new Boolean(params['dryRun'][0]) : false
         def disablePropertiesSupport = params['disablePropertiesSupport'] ? new Boolean(params['disablePropertiesSupport'][0]) : false
@@ -65,7 +68,7 @@ executions {
             log.warn('Deprecated month parameter and the new timeInterval are used in parallel: month has been ignored.', properties)
         }
 
-        artifactCleanup(timeUnit, timeInterval, repos, log, paceTimeMS, dryRun, disablePropertiesSupport)
+        artifactCleanup(timeUnit, timeInterval, timeFromLastModified, repos, log, paceTimeMS, dryRun, disablePropertiesSupport)
     }
 
     cleanupCtl(groups: [pluginGroup]) { params ->
@@ -138,6 +141,7 @@ if ( configFile.exists() ) {
         def repos = policySettings.containsKey("repos") ? policySettings.repos as String[] : ["__none__"]
         def timeUnit = policySettings.containsKey("timeUnit") ? policySettings.timeUnit as String : DEFAULT_TIME_UNIT
         def timeInterval = policySettings.containsKey("timeInterval") ? policySettings.timeInterval as int : DEFAULT_TIME_INTERVAL
+        def timeFromLastModified = policySettings.containsKey("timeFromLastModified") ? new Boolean(policySettings.timeFromLastModified) : false
         def paceTimeMS = policySettings.containsKey("paceTimeMS") ? policySettings.paceTimeMS as int : 0
         def dryRun = policySettings.containsKey("dryRun") ? new Boolean(policySettings.dryRun) : false
         def disablePropertiesSupport = policySettings.containsKey("disablePropertiesSupport") ? new Boolean(policySettings.disablePropertiesSupport) : false
@@ -145,7 +149,7 @@ if ( configFile.exists() ) {
         jobs {
             "scheduledCleanup_$count"(cron: cron) {
                 log.info "Policy settings for scheduled run at($cron): repo list($repos), timeUnit($timeUnit), timeInterval($timeInterval), paceTimeMS($paceTimeMS) dryrun($dryRun) disablePropertiesSupport($disablePropertiesSupport)"
-                artifactCleanup( timeUnit, timeInterval, repos, log, paceTimeMS, dryRun, disablePropertiesSupport )
+                artifactCleanup( timeUnit, timeInterval, timeFromLastModified, repos, log, paceTimeMS, dryRun, disablePropertiesSupport )
             }
         }
         count++
@@ -156,7 +160,7 @@ if ( deprecatedConfigFile.exists() && configFile.exists() ) {
     log.warn "The deprecated artifactCleanup.properties and the new artifactCleanup.json are defined in parallel. You should migrate the old file and remove it."
 }
 
-private def artifactCleanup(String timeUnit, int timeInterval, String[] repos, log, paceTimeMS, dryRun = false, disablePropertiesSupport = false) {
+private def artifactCleanup(String timeUnit, int timeInterval, timeFromLastModified, String[] repos, log, paceTimeMS, dryRun = false, disablePropertiesSupport = false) {
     log.info "Starting artifact cleanup for repositories $repos, until $timeInterval ${timeUnit}s ago with pacing interval $paceTimeMS ms, dryrun: $dryRun, disablePropertiesSupport: $disablePropertiesSupport"
 
     // Create Map(repo, paths) of skiped paths (or others properties supported in future ...)
@@ -165,65 +169,76 @@ private def artifactCleanup(String timeUnit, int timeInterval, String[] repos, l
         skip = getSkippedPaths(repos)
     }
 
-    def calendarUntil = Calendar.getInstance()
-
-    calendarUntil.add(mapTimeUnitToCalendar(timeUnit), -timeInterval)
-
-    def calendarUntilFormatted = new SimpleDateFormat("yyyy/MM/dd HH:mm").format(calendarUntil.getTime());
-    log.info "Removing all artifacts not downloaded since $calendarUntilFormatted"
-
     Global.stopCleaning = false
     int cntFoundArtifacts = 0
     int cntNoDeletePermissions = 0
     long bytesFound = 0
     long bytesFoundWithNoDeletePermission = 0
-    def artifactsCleanedUp = searches.artifactsNotDownloadedSince(calendarUntil, calendarUntil, repos)
-    artifactsCleanedUp.find {
+
+    repos.each { repo ->
         try {
-            while ( Global.pauseCleaning ) {
-                log.info "Pausing by request"
-                sleep( 60000 )
-            }
-
-            if ( Global.stopCleaning ) {
-                log.info "Stopping by request, ending loop"
-                return true
-            }
-
-            if ( ! disablePropertiesSupport && skip[ it.repoKey ] && StringUtils.startsWithAny(it.path, skip[ it.repoKey ])){
-                if (log.isDebugEnabled()){
-                    log.debug "Skip $it"
+            def calendarUntil = Calendar.getInstance()
+            if (timeFromLastModified) {
+                def repoPath = RepoPathFactory.create(repo, '')
+                def repoArtifacts = searches.artifactsNotDownloadedSince(null, null, repo)
+                if (repoArtifacts.size > 0) {
+                    repoArtifacts.sort { repositories.getItemInfo(it).lastModified }
+                    def latestArtifactInfo = repositories.getItemInfo(repoArtifacts.reverse()[0]);
+                    calendarUntil.setTimeInMillis(latestArtifactInfo.lastModified);
                 }
-                return false
             }
 
-            bytesFound += repositories.getItemInfo(it)?.getSize()
-            cntFoundArtifacts++
-            if (!security.canDelete(it)) {
-                bytesFoundWithNoDeletePermission += repositories.getItemInfo(it)?.getSize()
-                cntNoDeletePermissions++
-            }
-            if (dryRun) {
-                log.info "Found $it, $cntFoundArtifacts/$artifactsCleanedUp.size total $bytesFound bytes"
-                log.info "\t==> currentUser: ${security.currentUser().getUsername()}"
-                log.info "\t==> canDelete: ${security.canDelete(it)}"
+            calendarUntil.add(mapTimeUnitToCalendar(timeUnit), -timeInterval);
+            def calendarUntilFormatted = new SimpleDateFormat("yyyy/MM/dd HH:mm").format(calendarUntil.getTime());
+            log.info "Removing all artifacts not downloaded since $calendarUntilFormatted from $repo"
 
-            } else {
-                if (security.canDelete(it)) {
-                    log.info "Deleting $it, $cntFoundArtifacts/$artifactsCleanedUp.size total $bytesFound bytes"
-                    repositories.delete it
+            def artifactsCleanedUp = searches.artifactsNotDownloadedSince(calendarUntil, calendarUntil, repo)
+            artifactsCleanedUp.find { artifact ->
+                while ( Global.pauseCleaning ) {
+                    log.info "Pausing by request"
+                    sleep( 60000 )
+                }
+
+                if ( Global.stopCleaning ) {
+                    log.info "Stopping by request, ending loop"
+                    return true
+                }
+
+                if ( ! disablePropertiesSupport && skip[ artifact.repoKey ] && StringUtils.startsWithAny(artifact.path, skip[ artifact.repoKey ])){
+                    if (log.isDebugEnabled()){
+                        log.debug "Skip $artifact"
+                    }
+                    return false
+                }
+
+                bytesFound += repositories.getItemInfo(artifact)?.getSize()
+                cntFoundArtifacts++
+                if (!security.canDelete(artifact)) {
+                    bytesFoundWithNoDeletePermission += repositories.getItemInfo(artifact)?.getSize()
+                    cntNoDeletePermissions++
+                }
+                if (dryRun) {
+                    log.info "Found $artifact, $cntFoundArtifacts/$artifactsCleanedUp.size total $bytesFound bytes"
+                    log.info "\t==> currentUser: ${security.currentUser().getUsername()}"
+                    log.info "\t==> canDelete: ${security.canDelete(artifact)}"
+
                 } else {
-                    log.info "Can't delete $it (user ${security.currentUser().getUsername()} has no delete permissions), " +
+                    if (security.canDelete(artifact)) {
+                        log.info "Deleting $artifact, $cntFoundArtifacts/$artifactsCleanedUp.size total $bytesFound bytes"
+                        repositories.delete artifact
+                    } else {
+                        log.info "Can't delete $artifact (user ${security.currentUser().getUsername()} has no delete permissions), " +
                             "$cntFoundArtifacts/$artifactsCleanedUp.size total $bytesFound bytes"
+                    }
+                }
+                def sleepTime = (Global.paceTimeMS > 0) ? Global.paceTimeMS : paceTimeMS
+                if (sleepTime > 0) {
+                    sleep( sleepTime )
                 }
             }
+                
         } catch (ItemNotFoundRuntimeException ex) {
-            log.info "Failed to find $it, skipping"
-        }
-
-        def sleepTime = (Global.paceTimeMS > 0) ? Global.paceTimeMS : paceTimeMS
-        if (sleepTime > 0) {
-            sleep( sleepTime )
+            log.info "Failed to find $artifact, skipping"
         }
 
         return false

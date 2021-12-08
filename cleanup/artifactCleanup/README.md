@@ -23,6 +23,7 @@ Parameters
 - `months`: **Deprecated**. Instead of `timeUnit` and `timeInterval` the `month` parameter is supported for backwards compatibility reasons. It defined the months to look back before deleting an artifact. Default *1*.
 - `timeUnit`: The unit of the time interval. *year*, *month*, *day*, *hour* or *minute* are allowed values. Default *month*.
 - `timeInterval`: The time interval to look back before deleting an artifact. Default *1*.
+- `timeFromLastModified`: If true the base time is from the last modified artifact in each repo instead of the current time. This stops dormant repos from having all artifacts deleted.
 - `repos`: A list of repositories to clean. This parameter is required.
 - `dryRun`: If this parameter is passed, artifacts will not actually be deleted. Default *false*.
 - `paceTimeMS`: The number of milliseconds to delay between delete operations. Default *0*.
@@ -53,6 +54,7 @@ The following properties are supported by each policy descriptor object:
 - `repos`: The mandatory list of repositories the policies will be applied to.
 - `timeUnit`: The unit of the time interval. *year*, *month*, *day*, *hour* or *minute* are allowed values. Default *month*.
 - `timeInterval`: The time interval to look back before deleting an artifact. Default *1*.
+- `timeFromLastModified`: If true the base time is from the last modified artifact in each repo instead of the current time. This stops dormant repos from having all artifacts deleted.
 - `dryRun`:  If this parameter is passed, artifacts will not actually be deleted. Default *false*.
 - `paceTimeMS`: The number of milliseconds to delay between delete operations. Default *0*.
 - `disablePropertiesSupport`: Disable the support of Artifactory Properties (see above *Artifactory Properties support* section).
@@ -68,6 +70,7 @@ An example file could contain the following json:
             ],
             "timeUnit": "day",
             "timeInterval": 3,
+            "timeFromLastModified": false,
             "dryRun": true,
             "paceTimeMS": 500,
             "disablePropertiesSupport": true
