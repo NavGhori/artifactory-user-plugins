@@ -193,6 +193,8 @@ private def artifactCleanup(String timeUnit, int timeInterval, timeFromLastModif
             log.info "Removing all artifacts not downloaded since $calendarUntilFormatted from $repo"
 
             def artifactsCleanedUp = searches.artifactsNotDownloadedSince(calendarUntil, calendarUntil, repo)
+            int repoCntFoundArtifacts = 0
+            long repoBytesFound = 0
             artifactsCleanedUp.find { artifact ->
                 while ( Global.pauseCleaning ) {
                     log.info "Pausing by request"
@@ -212,7 +214,9 @@ private def artifactCleanup(String timeUnit, int timeInterval, timeFromLastModif
                 }
 
                 bytesFound += repositories.getItemInfo(artifact)?.getSize()
+                repoBytesFound += repositories.getItemInfo(artifact)?.getSize()
                 cntFoundArtifacts++
+                repoCntFoundArtifacts++
                 if (!security.canDelete(artifact)) {
                     bytesFoundWithNoDeletePermission += repositories.getItemInfo(artifact)?.getSize()
                     cntNoDeletePermissions++
@@ -236,6 +240,8 @@ private def artifactCleanup(String timeUnit, int timeInterval, timeFromLastModif
                     sleep( sleepTime )
                 }
             }
+
+           log.info "Repo $repo: Found $repoCntFoundArtifacts artifacts consuming $repoBytesFound bytes"
                 
         } catch (ItemNotFoundRuntimeException ex) {
             log.info "Failed to find $artifact, skipping"
